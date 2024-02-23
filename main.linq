@@ -31,52 +31,22 @@
 
 async Task Main(string[] args)
 {
-#if DEBUG
-	var configPath = "./config.json";
-#else
-	if (args.Length < 1) return;
-	var configPath = args[0];
-#endif
+	var configPath = args is null || args.Length < 1 ? "./config.json" : args[0];
+	
 	Directory.SetCurrentDirectory(Directory.GetParent(Util.CurrentQueryPath)!.FullName);
 	var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(configPath))!;
 
 	var credential = await GetCredentialAsync(config, new[] { GmailService.Scope.GmailReadonly });
 	
-	var service = new GmailService(new BaseClientService.Initializer
-	{
-		HttpClientInitializer = credential
-	});
+	var service = new GmailService(new BaseClientService.Initializer{ HttpClientInitializer = credential });
 
-	var emails = new List<Email>();
-	var listMessagesRequest = service.Users.Messages.List(config.EmailAddress);
-	var hasNext = true;
-#if DEBUG
-	var n = 3;
-#endif
-	while (hasNext)
+	await foreach (var email in ReadEmails(service, config.EmailAddress))
 	{
-		var response = await listMessagesRequest.ExecuteAsync();
-		foreach (var message in response.Messages)
-		{
-			var getMessageRequest = service.Users.Messages.Get(config.EmailAddress, message.Id);
-			getMessageRequest.Format = UsersResource.MessagesResource.GetRequest.FormatEnum.Full;
-			var messageInfo = await getMessageRequest.ExecuteAsync();
-			emails.Add(messageInfo.ToEmail());
-#if DEBUG
-			if (emails.Count() == n)
-			{
-				hasNext = false;
-				break;
-			}
-#endif
-		}
-		if (response.NextPageToken is null) hasNext = false;
-		else listMessagesRequest.PageToken = response.NextPageToken;
+		email.Dump();
 	}
-	emails.Dump();
 }
 
-public record Email(string Date, string From, string Subject, string Body);
+record Config(string EmailAddress, string ClientId, string ClientSecret);
 
 static async Task<UserCredential> GetCredentialAsync(Config config, string[] scopes)
 {
@@ -85,14 +55,32 @@ static async Task<UserCredential> GetCredentialAsync(Config config, string[] sco
 		ClientId = config.ClientId,
 		ClientSecret = config.ClientSecret
 	};
-	
+
 	return await GoogleWebAuthorizationBroker.AuthorizeAsync(
-		secrets, scopes, 
-		config.EmailAddress, 
+		secrets, scopes,
+		config.EmailAddress,
 		CancellationToken.None);
 }
 
-record Config(string EmailAddress, string ClientId, string ClientSecret);
+public record Email(string Date, string From, string Subject, List<string> Body);
+
+static async IAsyncEnumerable<Email> ReadEmails(GmailService service, string emailAddress)
+{
+	var listMessagesRequest = service.Users.Messages.List(emailAddress);
+	while (true)
+	{
+		var response = await listMessagesRequest.ExecuteAsync();
+		foreach (var message in response.Messages)
+		{
+			var getMessageRequest = service.Users.Messages.Get(emailAddress, message.Id);
+			getMessageRequest.Format = UsersResource.MessagesResource.GetRequest.FormatEnum.Full;
+			var messageInfo = await getMessageRequest.ExecuteAsync();
+			yield return messageInfo.ToEmail();
+		}
+		if (response.NextPageToken is null) break;
+		listMessagesRequest.PageToken = response.NextPageToken;
+	}
+}
 
 static class Extensions 
 {
@@ -107,7 +95,7 @@ static class Extensions
 				.Select(x => x.Body.Data)
 				.Where(x => !string.IsNullOrWhiteSpace(x))
 				.ToList();
-		var body = string.Join("", encodedBodyChunks.Select(ParseBase64Chunk));
+		var body = encodedBodyChunks.Select(ParseBase64Chunk).ToList();
 		return new Email(date, from, subject, body);
 		
 		static string ParseBase64Chunk(string chunk)
