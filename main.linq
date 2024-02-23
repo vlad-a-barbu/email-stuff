@@ -110,6 +110,7 @@ static async IAsyncEnumerable<Email> ReadEmails(
 	params Func<Email, bool>[] filters)
 {
 	var listMessagesRequest = service.Users.Messages.List(emailAddress);
+	// todo -> map filters to ListRequest.Q
 	while (true)
 	{
 		var response = await listMessagesRequest.ExecuteAsync();
