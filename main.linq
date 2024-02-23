@@ -49,23 +49,29 @@ async Task Main(string[] args)
 
 	var emails = new List<Email>();
 	var listMessagesRequest = service.Users.Messages.List(config.EmailAddress);
-	while (true)
+	var hasNext = true;
+#if DEBUG
+	var n = 3;
+#endif
+	while (hasNext)
 	{
 		var response = await listMessagesRequest.ExecuteAsync();
-		response.Messages.Count().Dump();
 		foreach (var message in response.Messages)
 		{
 			var getMessageRequest = service.Users.Messages.Get(config.EmailAddress, message.Id);
 			getMessageRequest.Format = UsersResource.MessagesResource.GetRequest.FormatEnum.Full;
 			var messageInfo = await getMessageRequest.ExecuteAsync();
 			emails.Add(messageInfo.ToEmail());
-		}
 #if DEBUG
-		break;
-#else
-		if (response.NextPageToken is null) break;
-		listMessagesRequest.PageToken = response.NextPageToken;
+			if (emails.Count() == n)
+			{
+				hasNext = false;
+				break;
+			}
 #endif
+		}
+		if (response.NextPageToken is null) hasNext = false;
+		else listMessagesRequest.PageToken = response.NextPageToken;
 	}
 	emails.Dump();
 }
@@ -95,7 +101,20 @@ static class Extensions
 		var date = message.Payload.Headers.SingleOrDefault(h => h.Name == "Date")?.Value ?? string.Empty;
 		var from = message.Payload.Headers.SingleOrDefault(h => h.Name == "From")?.Value ?? string.Empty;
 		var subject = message.Payload.Headers.SingleOrDefault(h => h.Name == "Subject")?.Value ?? string.Empty;
-		var body = ""; // todo
+		var encodedBodyChunks = !string.IsNullOrWhiteSpace(message.Payload.Body?.Data)
+			? new List<string> { message.Payload.Body.Data }
+			: message.Payload.Parts
+				.Select(x => x.Body.Data)
+				.Where(x => !string.IsNullOrWhiteSpace(x))
+				.ToList();
+		var body = string.Join("", encodedBodyChunks.Select(ParseBase64Chunk));
 		return new Email(date, from, subject, body);
+		
+		static string ParseBase64Chunk(string chunk)
+		{
+			chunk = chunk.Replace("-", "+");
+			chunk = chunk.Replace("_", "/");
+			return Encoding.UTF8.GetString(Convert.FromBase64String(chunk));
+		}
 	}
 }
