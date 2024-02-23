@@ -40,13 +40,31 @@ async Task Main(string[] args)
 	
 	var service = new GmailService(new BaseClientService.Initializer{ HttpClientInitializer = credential });
 
-	await foreach (var email in ReadEmails(service, config.EmailAddress))
+	var filters = config.Filters.Select(CompileFilter).ToArray();
+
+	await foreach (var email in ReadEmails(service, config.EmailAddress, filters))
 	{
 		email.Dump();
 	}
 }
 
-record Config(string EmailAddress, string ClientId, string ClientSecret);
+record Config(string EmailAddress, string ClientId, string ClientSecret, Filter[] Filters);
+record Filter(string By, string Op, string[] Args);
+
+static Func<Email, bool> CompileFilter(Filter filter)
+{
+	var prop = typeof(Email).GetProperty(filter.By)
+		?? throw new ArgumentException(nameof(filter));
+
+	return filter.Op.ToLower() switch
+	{
+		"eq" => (Email x) => prop.GetValue(x)!.ToString() == filter.Args.Single(),
+		"neq" => (Email x) => prop.GetValue(x)!.ToString() != filter.Args.Single(),
+		"in" => (Email x) => filter.Args.Contains(prop.GetValue(x)!.ToString()),
+		
+		_ => _ => true
+	};
+}
 
 static async Task<UserCredential> GetCredentialAsync(Config config, string[] scopes)
 {
@@ -62,9 +80,11 @@ static async Task<UserCredential> GetCredentialAsync(Config config, string[] sco
 		CancellationToken.None);
 }
 
-public record Email(string Date, string From, string Subject, List<string> Body);
+public record Email(string Id, DateTime Date, string From, string Subject, List<string> Body);
 
-static async IAsyncEnumerable<Email> ReadEmails(GmailService service, string emailAddress)
+static async IAsyncEnumerable<Email> ReadEmails(
+	GmailService service, string emailAddress,
+	params Func<Email, bool>[] filters)
 {
 	var listMessagesRequest = service.Users.Messages.List(emailAddress);
 	while (true)
@@ -75,19 +95,24 @@ static async IAsyncEnumerable<Email> ReadEmails(GmailService service, string ema
 			var getMessageRequest = service.Users.Messages.Get(emailAddress, message.Id);
 			getMessageRequest.Format = UsersResource.MessagesResource.GetRequest.FormatEnum.Full;
 			var messageInfo = await getMessageRequest.ExecuteAsync();
-			yield return messageInfo.ToEmail();
+			var email = messageInfo.ToEmail();
+			if (filters.All(f => f(email)))
+			{
+				yield return email;
+			}
 		}
 		if (response.NextPageToken is null) break;
 		listMessagesRequest.PageToken = response.NextPageToken;
 	}
 }
 
-static class Extensions 
+public static class Extensions
 {
 	public static Email ToEmail(this Message message)
 	{
-		var date = message.Payload.Headers.SingleOrDefault(h => h.Name == "Date")?.Value ?? string.Empty;
+		var date = DateTimeOffset.FromUnixTimeMilliseconds(message.InternalDate!.Value).DateTime;
 		var from = message.Payload.Headers.SingleOrDefault(h => h.Name == "From")?.Value ?? string.Empty;
+		var fromEmail = Regex.Match(from, "<(.*)>").Groups[1].Value;
 		var subject = message.Payload.Headers.SingleOrDefault(h => h.Name == "Subject")?.Value ?? string.Empty;
 		var encodedBodyChunks = !string.IsNullOrWhiteSpace(message.Payload.Body?.Data)
 			? new List<string> { message.Payload.Body.Data }
@@ -96,7 +121,7 @@ static class Extensions
 				.Where(x => !string.IsNullOrWhiteSpace(x))
 				.ToList();
 		var body = encodedBodyChunks.Select(ParseBase64Chunk).ToList();
-		return new Email(date, from, subject, body);
+		return new Email(message.Id, date, fromEmail, subject, body);
 		
 		static string ParseBase64Chunk(string chunk)
 		{
