@@ -1,5 +1,8 @@
 <Query Kind="Program">
+  <NuGetReference>Dapper</NuGetReference>
   <NuGetReference>Google.Apis.Gmail.v1</NuGetReference>
+  <NuGetReference>Npgsql</NuGetReference>
+  <Namespace>Dapper</Namespace>
   <Namespace>Google</Namespace>
   <Namespace>Google.Apis</Namespace>
   <Namespace>Google.Apis.Auth</Namespace>
@@ -22,9 +25,28 @@
   <Namespace>Google.Apis.Upload</Namespace>
   <Namespace>Google.Apis.Util</Namespace>
   <Namespace>Google.Apis.Util.Store</Namespace>
+  <Namespace>Microsoft.Extensions.DependencyInjection</Namespace>
+  <Namespace>Microsoft.Extensions.DependencyInjection.Extensions</Namespace>
+  <Namespace>Microsoft.Extensions.Logging</Namespace>
+  <Namespace>Microsoft.Extensions.Logging.Abstractions</Namespace>
+  <Namespace>Npgsql</Namespace>
+  <Namespace>Npgsql.BackendMessages</Namespace>
+  <Namespace>Npgsql.Internal</Namespace>
+  <Namespace>Npgsql.Internal.Postgres</Namespace>
+  <Namespace>Npgsql.NameTranslation</Namespace>
+  <Namespace>Npgsql.PostgresTypes</Namespace>
+  <Namespace>Npgsql.Replication</Namespace>
+  <Namespace>Npgsql.Replication.Internal</Namespace>
+  <Namespace>Npgsql.Replication.PgOutput</Namespace>
+  <Namespace>Npgsql.Replication.PgOutput.Messages</Namespace>
+  <Namespace>Npgsql.Replication.TestDecoding</Namespace>
+  <Namespace>Npgsql.Schema</Namespace>
+  <Namespace>Npgsql.TypeMapping</Namespace>
+  <Namespace>Npgsql.Util</Namespace>
+  <Namespace>NpgsqlTypes</Namespace>
   <Namespace>System.Management</Namespace>
-  <Namespace>System.Threading.Tasks</Namespace>
   <Namespace>System.Text.Json</Namespace>
+  <Namespace>System.Threading.Tasks</Namespace>
 </Query>
 
 #nullable enable
@@ -42,13 +64,14 @@ async Task Main(string[] args)
 
 	var filters = config.Filters.Select(CompileFilter).ToArray();
 
+	using var db = new Db(config.ConnString);
 	await foreach (var email in ReadEmails(service, config.EmailAddress, filters))
 	{
-		email.Dump();
+		await db.StoreAsync(email);
 	}
 }
 
-record Config(string EmailAddress, string ClientId, string ClientSecret, Filter[] Filters);
+record Config(string EmailAddress, string ClientId, string ClientSecret, Filter[] Filters, string ConnString);
 record Filter(string By, string Op, string[] Args);
 
 static Func<Email, bool> CompileFilter(Filter filter)
@@ -129,5 +152,47 @@ public static class Extensions
 			chunk = chunk.Replace("_", "/");
 			return Encoding.UTF8.GetString(Convert.FromBase64String(chunk));
 		}
+	}
+}
+
+class Db : IDisposable
+{
+	private readonly NpgsqlConnection _conn;
+
+	public Db(string connString)
+	{
+		_conn = new NpgsqlConnection(connString);
+		_conn.Open();
+	}
+
+	public async Task StoreAsync(Email email)
+	{
+		using var tran = await _conn.BeginTransactionAsync();
+		try
+		{
+			await _conn.ExecuteAsync(InsertEmailSql(email));
+			await tran.CommitAsync();
+		}
+		catch
+		{
+			await tran.RollbackAsync();
+		}
+	}
+
+	private static string InsertEmailSql(Email email)
+	{
+		var sql = $@"
+			INSERT INTO ""raw"".emails
+			(""Id"", ""Date"", ""From"", ""Subject"", ""Body"")
+			VALUES
+			('{email.Id}', '{email.Date}', '{email.From}', '{email.Subject}',
+			ARRAY [{string.Join(",", email.Body.Select(x => $"'{x.Replace("'", "''")}'"))}]);
+		";
+		return sql;
+	}
+
+	public void Dispose()
+	{
+		_conn.Close();
 	}
 }
