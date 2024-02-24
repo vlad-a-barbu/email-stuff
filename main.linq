@@ -195,5 +195,6 @@ class Db : IDisposable
 	public void Dispose()
 	{
 		_conn.Close();
+		_conn.Dispose();
 	}
 }
