@@ -171,7 +171,7 @@ class Db : IDisposable
 		using var tran = await _conn.BeginTransactionAsync();
 		try
 		{
-			await _conn.ExecuteAsync(InsertEmailSql(email));
+			await _conn.ExecuteAsync(InsertEmailSql(email), transaction: tran);
 			await tran.CommitAsync();
 		}
 		catch
@@ -195,5 +195,6 @@ class Db : IDisposable
 	public void Dispose()
 	{
 		_conn.Close();
+		_conn.Dispose();
 	}
 }
